@@ -1,6 +1,12 @@
 const admin = require('firebase-admin');
+const fs = require('fs');
+const path = '/etc/secrets/firebase-service-account.json';
 
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+if (!fs.existsSync(path)) {
+  throw new Error('❌ Firebase service account file not found!');
+}
+
+const serviceAccount = JSON.parse(fs.readFileSync(path, 'utf8'));
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -8,5 +14,4 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-
 module.exports = db;
