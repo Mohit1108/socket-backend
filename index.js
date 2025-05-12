@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const db = require('./firebase'); // Make sure this exports Firestore
 
 const app = express();
 app.use(cors());
@@ -15,14 +16,12 @@ const io = new Server(server, {
   }
 });
 
-// In-memory room store
-const rooms = {};
-
+// Socket.IO handlers
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // Create Room
-  socket.on('room:create', ({ code, userId, nickname, defaultVideo }) => {
+  // CREATE ROOM
+  socket.on('room:create', async ({ code, userId, nickname, defaultVideo }) => {
     const newRoom = {
       id: socket.id,
       code,
@@ -42,21 +41,21 @@ io.on('connection', (socket) => {
       }
     };
 
-    rooms[code] = newRoom;
+    await db.collection('rooms').doc(code).set(newRoom);
     socket.join(code);
-
     console.log(`✅ Room ${code} created by ${nickname}`);
     io.to(socket.id).emit('room:created', newRoom);
   });
 
-  // Join Room
-  socket.on('room:join', ({ code, userId, nickname }) => {
-    const room = rooms[code];
-    if (!room) {
+  // JOIN ROOM
+  socket.on('room:join', async ({ code, userId, nickname }) => {
+    const doc = await db.collection('rooms').doc(code).get();
+    if (!doc.exists) {
       socket.emit('room:error', 'Room not found');
-      console.warn(`❌ Join failed: Room ${code} not found`);
       return;
     }
+
+    const room = doc.data();
 
     if (!room.users.find(u => u.id === userId)) {
       room.users.push({ id: userId, nickname, isHost: false });
@@ -70,131 +69,155 @@ io.on('connection', (socket) => {
       });
     }
 
+    await db.collection('rooms').doc(code).set(room);
     socket.join(code);
-    console.log(`👥 ${nickname} joined room ${code}`);
-
     io.to(socket.id).emit('room:updated', room);
     socket.to(code).emit('room:updated', room);
   });
 
-  // Leave Room
-  socket.on('room:leave', ({ roomId, userId }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // LEAVE ROOM
+  socket.on('room:leave', async ({ roomId, userId }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.users = room.users.filter(u => u.id !== userId);
+    await db.collection('rooms').doc(room.code).set(room);
     socket.leave(room.code);
-    console.log(`🚪 User ${userId} left room ${room.code}`);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Add Video
-  socket.on('video:add', ({ roomId, queueItem }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // ADD VIDEO
+  socket.on('video:add', async ({ roomId, queueItem }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.videoQueue.push(queueItem);
     if (room.currentVideoIndex === -1) {
       room.currentVideoIndex = 0;
-      room.playerState.isPlaying = true;
-      room.playerState.currentTime = 0;
-      room.playerState.lastUpdated = Date.now();
+      room.playerState = { isPlaying: true, currentTime: 0, lastUpdated: Date.now() };
     }
 
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Remove Video
-  socket.on('video:remove', ({ roomId, videoId }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // REMOVE VIDEO
+  socket.on('video:remove', async ({ roomId, videoId }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.videoQueue = room.videoQueue.filter(v => v.id !== videoId);
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Skip Video
-  socket.on('video:skip', ({ roomId }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // SKIP VIDEO
+  socket.on('video:skip', async ({ roomId }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
-    if (room.currentVideoIndex < room.videoQueue.length - 1) {
-      room.currentVideoIndex += 1;
-    } else {
-      room.currentVideoIndex = -1;
-    }
+    room.currentVideoIndex = room.currentVideoIndex < room.videoQueue.length - 1
+      ? room.currentVideoIndex + 1
+      : -1;
 
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Play / Pause
-  socket.on('video:playPause', ({ roomId, isPlaying }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // PLAY / PAUSE
+  socket.on('video:playPause', async ({ roomId, isPlaying }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.playerState.isPlaying = isPlaying;
     room.playerState.lastUpdated = Date.now();
+
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Seek
-  socket.on('video:seek', ({ roomId, time }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // SEEK
+  socket.on('video:seek', async ({ roomId, time }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.playerState.currentTime = time;
     room.playerState.lastUpdated = Date.now();
+
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Message
-  socket.on('message:send', ({ roomId, message }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // SEND MESSAGE
+  socket.on('message:send', async ({ roomId, message }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.messages.push(message);
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Reaction
+  // SEND REACTION
   socket.on('reaction:send', ({ roomId, reaction }) => {
     io.to(roomId).emit('reaction:new', reaction);
   });
 
-  // Update Nickname
-  socket.on('user:update', ({ roomId, userId, nickname }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // UPDATE NICKNAME
+  socket.on('user:update', async ({ roomId, userId, nickname }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     const user = room.users.find(u => u.id === userId);
-    if (user) {
-      user.nickname = nickname;
-      io.to(room.code).emit('room:updated', room);
-    }
-  });
+    if (user) user.nickname = nickname;
 
-  // Room Settings
-  socket.on('room:updateSettings', ({ roomId, settings }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
-
-    room.settings = { ...room.settings, ...settings };
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Pin Message
-  socket.on('message:pin', ({ roomId, messageId }) => {
-    const room = Object.values(rooms).find(r => r.id === roomId);
-    if (!room) return;
+  // UPDATE SETTINGS
+  socket.on('room:updateSettings', async ({ roomId, settings }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
+
+    room.settings = { ...room.settings, ...settings };
+    await db.collection('rooms').doc(room.code).set(room);
+    io.to(room.code).emit('room:updated', room);
+  });
+
+  // PIN MESSAGE
+  socket.on('message:pin', async ({ roomId, messageId }) => {
+    const snap = await db.collection('rooms').where('id', '==', roomId).get();
+    if (snap.empty) return;
+    const doc = snap.docs[0];
+    const room = doc.data();
 
     room.messages = room.messages.map(msg =>
       msg.id === messageId ? { ...msg, pinned: !msg.pinned } : msg
     );
 
+    await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // Disconnect
   socket.on('disconnect', () => {
     console.log('❎ User disconnected:', socket.id);
   });
