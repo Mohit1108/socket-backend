@@ -54,35 +54,38 @@ io.on('connection', (socket) => {
   // Join Room
   socket.on('room:join', ({ code, userId, nickname }) => {
     const room = rooms[code];
-
+  
     if (!room) {
       socket.emit('room:error', 'Room not found');
       console.warn(`❌ Join failed: Room ${code} not found`);
       return;
     }
-
+  
     // Add user if not already in room
     if (!room.users.find(u => u.id === userId)) {
       room.users.push({ id: userId, nickname, isHost: false });
+  
+      room.messages.push({
+        id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        userId: 'system',
+        nickname: 'System',
+        text: `${nickname} joined the room!`,
+        timestamp: Date.now(),
+        isSystemMessage: true
+      });
     }
-
+  
     socket.join(code);
-
-    // Optionally add system message
-    room.messages.push({
-      id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      userId: 'system',
-      nickname: 'System',
-      text: `${nickname} joined the room!`,
-      timestamp: Date.now(),
-      isSystemMessage: true
-    });
-    
-    
+  
     console.log(`👥 ${nickname} (${userId}) joined room ${code}`);
-    io.to(code).emit('room:updated', room);
+  
+    // ✅ Emit directly to the joining socket
+    io.to(socket.id).emit('room:updated', room);
+  
+    // ✅ Emit to everyone else already in the room (excluding this socket)
+    socket.to(code).emit('room:updated', room);
   });
-
+  
   // Disconnect
   socket.on('disconnect', () => {
     console.log('❎ User disconnected:', socket.id);
