@@ -23,7 +23,7 @@ io.on('connection', (socket) => {
   // CREATE ROOM
   socket.on('room:create', async ({ code, userId, nickname, defaultVideo }) => {
     const newRoom = {
-      id: socket.id,
+      id: code, // <== this fixes the issue
       code,
       users: [{ id: userId, nickname, isHost: true }],
       videoQueue: defaultVideo ? [defaultVideo] : [],
@@ -40,12 +40,12 @@ io.on('connection', (socket) => {
         isPrivate: false
       }
     };
-
+  
     await db.collection('rooms').doc(code).set(newRoom);
     socket.join(code);
-    console.log(`✅ Room ${code} created by ${nickname}`);
     io.to(socket.id).emit('room:created', newRoom);
   });
+  
 
   // JOIN ROOM
   socket.on('room:join', async ({ code, userId, nickname }) => {
