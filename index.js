@@ -44,6 +44,7 @@ io.on('connection', (socket) => {
 
     rooms[code] = newRoom;
     socket.join(code);
+
     console.log(`✅ Room ${code} created by ${nickname}`);
     io.to(socket.id).emit('room:created', newRoom);
   });
@@ -133,7 +134,6 @@ io.on('connection', (socket) => {
 
     room.playerState.isPlaying = isPlaying;
     room.playerState.lastUpdated = Date.now();
-
     io.to(room.code).emit('room:updated', room);
   });
 
@@ -144,7 +144,6 @@ io.on('connection', (socket) => {
 
     room.playerState.currentTime = time;
     room.playerState.lastUpdated = Date.now();
-
     io.to(room.code).emit('room:updated', room);
   });
 
@@ -195,17 +194,17 @@ io.on('connection', (socket) => {
     io.to(room.code).emit('room:updated', room);
   });
 
+  // Disconnect
   socket.on('disconnect', () => {
     console.log('❎ User disconnected:', socket.id);
   });
 });
 
-// Health Check
+// Health check
 app.get('/', (req, res) => {
   res.send('✅ Socket.IO server is live!');
 });
 
-// Start Server
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
