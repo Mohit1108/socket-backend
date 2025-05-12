@@ -70,14 +70,15 @@ io.on('connection', (socket) => {
 
     // Optionally add system message
     room.messages.push({
-      id: `msg-${Date.now()}`,
+      id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       userId: 'system',
       nickname: 'System',
       text: `${nickname} joined the room!`,
       timestamp: Date.now(),
       isSystemMessage: true
     });
-
+    
+    
     console.log(`👥 ${nickname} (${userId}) joined room ${code}`);
     io.to(code).emit('room:updated', room);
   });
