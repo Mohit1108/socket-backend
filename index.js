@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const db = require('./firebase'); // Make sure this exports Firestore
+const db = require('./firebase');
 
 const app = express();
 app.use(cors());
@@ -16,14 +16,17 @@ const io = new Server(server, {
   }
 });
 
-// Socket.IO handlers
+function isUserHost(room, userId) {
+  const user = room.users.find(u => u.id === userId);
+  return user?.isHost === true;
+}
+
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // CREATE ROOM
   socket.on('room:create', async ({ code, userId, nickname, defaultVideo }) => {
     const newRoom = {
-      id: code, // <== this fixes the issue
+      id: code,
       code,
       users: [{ id: userId, nickname, isHost: true }],
       videoQueue: defaultVideo ? [defaultVideo] : [],
@@ -40,20 +43,15 @@ io.on('connection', (socket) => {
         isPrivate: false
       }
     };
-  
+
     await db.collection('rooms').doc(code).set(newRoom);
     socket.join(code);
     io.to(socket.id).emit('room:created', newRoom);
   });
-  
 
-  // JOIN ROOM
   socket.on('room:join', async ({ code, userId, nickname }) => {
     const doc = await db.collection('rooms').doc(code).get();
-    if (!doc.exists) {
-      socket.emit('room:error', 'Room not found');
-      return;
-    }
+    if (!doc.exists) return socket.emit('room:error', 'Room not found');
 
     const room = doc.data();
 
@@ -75,7 +73,27 @@ io.on('connection', (socket) => {
     socket.to(code).emit('room:updated', room);
   });
 
-  // LEAVE ROOM
+
+  // Add this event handler in your backend socket.io code
+socket.on('room:rejoin', async ({ code, userId, nickname }) => {
+  const doc = await db.collection('rooms').doc(code).get();
+  if (!doc.exists) return socket.emit('room:error', 'Room not found');
+
+  const room = doc.data();
+  const existingUser = room.users.find(u => u.id === userId);
+
+  if (!existingUser) {
+    room.users.push({ id: userId, nickname, isHost: false });
+  } else {
+    existingUser.nickname = nickname;
+  }
+
+  await db.collection('rooms').doc(code).set(room);
+  socket.join(code);
+  io.to(socket.id).emit('room:updated', room);
+});
+
+
   socket.on('room:leave', async ({ roomId, userId }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
@@ -88,12 +106,13 @@ io.on('connection', (socket) => {
     io.to(room.code).emit('room:updated', room);
   });
 
-  // ADD VIDEO
-  socket.on('video:add', async ({ roomId, queueItem }) => {
+  socket.on('video:add', async ({ roomId, queueItem, userId }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
     const doc = snap.docs[0];
     const room = doc.data();
+
+    if (!isUserHost(room, userId)) return socket.emit('room:error', 'Only host can add videos.');
 
     room.videoQueue.push(queueItem);
     if (room.currentVideoIndex === -1) {
@@ -105,79 +124,136 @@ io.on('connection', (socket) => {
     io.to(room.code).emit('room:updated', room);
   });
 
-  // REMOVE VIDEO
-  socket.on('video:remove', async ({ roomId, videoId }) => {
+  socket.on('video:remove', async ({ roomId, videoId, userId }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
     const doc = snap.docs[0];
     const room = doc.data();
+
+    if (!isUserHost(room, userId)) return socket.emit('room:error', 'Only host can remove videos.');
 
     room.videoQueue = room.videoQueue.filter(v => v.id !== videoId);
     await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // SKIP VIDEO
-  socket.on('video:skip', async ({ roomId }) => {
+  socket.on('video:skip', async ({ roomId, userId }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
     const doc = snap.docs[0];
     const room = doc.data();
+
+    if (!isUserHost(room, userId)) return socket.emit('room:error', 'Only host can skip videos.');
 
     room.currentVideoIndex = room.currentVideoIndex < room.videoQueue.length - 1
-      ? room.currentVideoIndex + 1
-      : -1;
+      ? room.currentVideoIndex + 1 : -1;
 
     await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // PLAY / PAUSE
-  socket.on('video:playPause', async ({ roomId, isPlaying }) => {
+  socket.on('room:updateSettings', async ({ roomId, settings, userId }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
     const doc = snap.docs[0];
     const room = doc.data();
 
-    room.playerState.isPlaying = isPlaying;
-    room.playerState.lastUpdated = Date.now();
+    if (!isUserHost(room, userId)) return socket.emit('room:error', 'Only host can update settings.');
 
+    room.settings = { ...room.settings, ...settings };
     await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // SEEK
-  socket.on('video:seek', async ({ roomId, time }) => {
+  socket.on('message:pin', async ({ roomId, messageId, userId }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
     const doc = snap.docs[0];
     const room = doc.data();
 
-    room.playerState.currentTime = time;
-    room.playerState.lastUpdated = Date.now();
+    if (!isUserHost(room, userId)) return socket.emit('room:error', 'Only host can pin messages.');
+
+    room.messages = room.messages.map(msg =>
+      msg.id === messageId ? { ...msg, pinned: !msg.pinned } : msg
+    );
 
     await db.collection('rooms').doc(room.code).set(room);
     io.to(room.code).emit('room:updated', room);
   });
 
-  // SEND MESSAGE
-  socket.on('message:send', async ({ roomId, message }) => {
+// Modify the video:playPause event handler
+socket.on('video:playPause', async ({ roomId, isPlaying }) => {
+  const snap = await db.collection('rooms').where('id', '==', roomId).get();
+  if (snap.empty) return;
+  const doc = snap.docs[0];
+  const room = doc.data();
+
+  // Add serverTime for better sync
+  room.playerState = {
+    ...room.playerState,
+    isPlaying,
+    lastUpdated: Date.now(),
+    serverTime: Date.now()
+  };
+
+  await db.collection('rooms').doc(room.code).set(room);
+  io.to(room.code).emit('room:updated', room);
+});
+
+// Similarly for video:seek
+socket.on('video:seek', async ({ roomId, time }) => {
+  const snap = await db.collection('rooms').where('id', '==', roomId).get();
+  if (snap.empty) return;
+  const doc = snap.docs[0];
+  const room = doc.data();
+
+  room.playerState = {
+    ...room.playerState,
+    currentTime: time,
+    lastUpdated: Date.now(),
+    serverTime: Date.now()
+  };
+
+  await db.collection('rooms').doc(room.code).set(room);
+  io.to(room.code).emit('room:updated', room);
+});
+
+// Add this helper function at the top
+async function updateRoom(code, updates) {
+  try {
+    const roomRef = db.collection('rooms').doc(code);
+    await roomRef.update(updates);
+    return true;
+  } catch (error) {
+    console.error('Error updating room:', error);
+    return false;
+  }
+}
+
+// Then use it in your event handlers
+socket.on('message:send', async ({ roomId, message }) => {
+  try {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
     const doc = snap.docs[0];
     const room = doc.data();
 
     room.messages.push(message);
-    await db.collection('rooms').doc(room.code).set(room);
-    io.to(room.code).emit('room:updated', room);
-  });
+    const success = await updateRoom(room.code, { messages: room.messages });
+    
+    if (success) {
+      io.to(room.code).emit('room:updated', room);
+    }
+  } catch (error) {
+    console.error('Error sending message:', error);
+    socket.emit('room:error', 'Failed to send message');
+  }
+});
 
-  // SEND REACTION
-  socket.on('reaction:send', ({ roomId, reaction }) => {
-    io.to(roomId).emit('reaction:new', reaction);
-  });
 
-  // UPDATE NICKNAME
+
+
+  
   socket.on('user:update', async ({ roomId, userId, nickname }) => {
     const snap = await db.collection('rooms').where('id', '==', roomId).get();
     if (snap.empty) return;
@@ -191,39 +267,44 @@ io.on('connection', (socket) => {
     io.to(room.code).emit('room:updated', room);
   });
 
-  // UPDATE SETTINGS
-  socket.on('room:updateSettings', async ({ roomId, settings }) => {
-    const snap = await db.collection('rooms').where('id', '==', roomId).get();
-    if (snap.empty) return;
-    const doc = snap.docs[0];
-    const room = doc.data();
-
-    room.settings = { ...room.settings, ...settings };
-    await db.collection('rooms').doc(room.code).set(room);
-    io.to(room.code).emit('room:updated', room);
-  });
-
-  // PIN MESSAGE
-  socket.on('message:pin', async ({ roomId, messageId }) => {
-    const snap = await db.collection('rooms').where('id', '==', roomId).get();
-    if (snap.empty) return;
-    const doc = snap.docs[0];
-    const room = doc.data();
-
-    room.messages = room.messages.map(msg =>
-      msg.id === messageId ? { ...msg, pinned: !msg.pinned } : msg
-    );
-
-    await db.collection('rooms').doc(room.code).set(room);
-    io.to(room.code).emit('room:updated', room);
-  });
-
   socket.on('disconnect', () => {
     console.log('❎ User disconnected:', socket.id);
   });
 });
 
-// Health check
+// Add this function to clean up inactive rooms
+async function cleanupInactiveRooms() {
+  try {
+    const sixHoursAgo = Date.now() - (6 * 60 * 60 * 1000);
+    const snap = await db.collection('rooms').get();
+    
+    for (const doc of snap.docs) {
+      const room = doc.data();
+      if (room.users.length === 0 && room.playerState.lastUpdated < sixHoursAgo) {
+        await doc.ref.delete();
+      }
+    }
+  } catch (error) {
+    console.error('Error cleaning up rooms:', error);
+  }
+}
+
+// Run cleanup every hour
+setInterval(cleanupInactiveRooms, 60 * 60 * 1000);
+
+
+const rateLimit = require('express-rate-limit');
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+
+app.use(limiter);
+
+
+
+
 app.get('/', (req, res) => {
   res.send('✅ Socket.IO server is live!');
 });
